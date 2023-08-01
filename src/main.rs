@@ -53,9 +53,11 @@ async fn criar_pessoa(pool: web::Data<Pool>, payload: web::Json<CriarPessoaDTO>)
     if NaiveDate::parse_from_str(&payload.nascimento, "%Y-%m-%d").is_err() {
         return Ok(HttpResponse::BadRequest().body("{\"error\": \"DATA INVALIDA\"}"))
     }
-    conn.execute("INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK) VALUES (?, ?, ?, ?, ?);", &[
+    if conn.execute("INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK) VALUES (?, ?, ?, ?, ?);", &[
         &id, &payload.apelido, &payload.nome, &payload.nascimento, &stack
-    ]).await?;
+    ]).await.is_err() {
+        return Ok(HttpResponse::UnprocessableEntity().finish())
+    };
     Ok(
         HttpResponse::Created()
             .append_header(("Location", format!("/pessoas/{id}")))
