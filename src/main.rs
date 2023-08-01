@@ -122,6 +122,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .service(criar_pessoa)
+            .service(consultar_pessoa)
+            .service(buscar_pessoas)
+            .service(contar_pessoas)
     })
     .keep_alive(KeepAlive::Os)
     .client_request_timeout(Duration::from_secs(0))
