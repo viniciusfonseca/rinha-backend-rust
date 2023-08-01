@@ -67,8 +67,12 @@ async fn criar_pessoa(pool: web::Data<Pool>, payload: web::Json<CriarPessoaDTO>)
 
 #[actix_web::get("/pessoas/{id}")]
 async fn consultar_pessoa(id: web::Path<String>, pool: web::Data<Pool>) -> APIResult {
-    let conn = pool.get().await?;
     let id = id.to_string();
+    match tokio::fs::read(&id).await {
+        Err(_) => (),
+        Ok(bytes) => return Ok(HttpResponse::Ok().body(bytes))
+    };
+    let conn = pool.get().await?;
     let rows = conn.query("SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.ID = ?;", &[&id]).await?;
     if rows.len() == 0 {
         return Ok(HttpResponse::NotFound().finish());
@@ -76,6 +80,7 @@ async fn consultar_pessoa(id: web::Path<String>, pool: web::Data<Pool>) -> APIRe
     let row = &rows[0];
     let dto = PessoaDTO::from(row);
     let body = serde_json::to_string(&dto)?;
+    tokio::spawn(tokio::fs::write(id, body.clone()));
     Ok(HttpResponse::Ok().body(body))
 }
 
