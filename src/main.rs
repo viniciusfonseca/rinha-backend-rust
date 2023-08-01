@@ -91,7 +91,7 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
     let nome = format!("%{t}%");
     let stack = format!("%,{t},%");
     let rows = conn.query(
-        "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE UPPER(P.APELIDO) LIKE ? OR UPPER(P.NOME) LIKE ? OR UPPER(P.STACK) LIKE ?;", &[
+        "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE UPPER(P.APELIDO) LIKE ? OR UPPER(P.NOME) LIKE ? OR UPPER(P.STACK) LIKE ? LIMIT 50;", &[
             &apelido, &nome, &stack
         ]).await?;
     let result = rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>();
