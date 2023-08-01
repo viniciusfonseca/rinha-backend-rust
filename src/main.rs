@@ -26,7 +26,7 @@ impl PessoaDTO {
     fn from(row: &Row) -> PessoaDTO {
         // COLUMNS: ID, APELIDO, NOME, NASCIMENTO, STACK
         let stack: Option<String> = row.get(4);
-        let stack: Option<Vec<String>> = match stack {
+        let stack = match stack {
             None => None,
             Some(s) => Some(s.split(',').map(|s| s.to_string()).collect())
         };
