@@ -127,8 +127,8 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
 async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
     let conn = pool.get().await?;
     let rows = &conn.query("SELECT COUNT(*) FROM PESSOAS;", &[]).await?;
-    let count: String = rows[0].get(0);
-    Ok(HttpResponse::Ok().body(count))
+    let count: i64 = rows[0].get(0);
+    Ok(HttpResponse::Ok().body(count.to_string()))
 }
 
 #[tokio::main]
@@ -145,16 +145,18 @@ async fn main() -> AsyncVoidResult {
     let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
     println!("postgres pool succesfully created");
 
-    pool.get().await?.execute(
-        "CREATE TABLE IF NOT EXISTS PESSOAS (
-            ID CHAR(32) CONSTRAINT ID_PK PRIMARY KEY,
-            APELIDO VARCHAR(32),
-            NOME VARCHAR(100),
-            NASCIMENTO CHAR(10),
-            STACK VARCHAR(1024),
-            CONSTRAINT APELIDO_UNIQUE UNIQUE (APELIDO)
-        );",
-    &[]).await?;
+    {
+        let _ = pool.get().await?.execute(
+            "CREATE TABLE IF NOT EXISTS PESSOAS (
+                ID CHAR(32) CONSTRAINT ID_PK PRIMARY KEY,
+                APELIDO VARCHAR(32),
+                NOME VARCHAR(100),
+                NASCIMENTO CHAR(10),
+                STACK VARCHAR(1024),
+                CONSTRAINT APELIDO_UNIQUE UNIQUE (APELIDO)
+            );",
+        &[]).await;
+    }
 
     let mut cfg = deadpool_redis::Config::default();
     cfg.url = Some("redis://172.17.0.1:6379".into());
