@@ -1,6 +1,6 @@
 use std::time::Duration;
 use actix_web::{HttpServer, App, web, http::KeepAlive, HttpResponse};
-use chrono::{NaiveDate};
+use chrono::NaiveDate;
 use deadpool_postgres::{Config, Runtime, PoolConfig, Pool};
 use tokio_postgres::{NoTls, Row};
 use serde::{Deserialize, Serialize};
@@ -41,9 +41,16 @@ impl PessoaDTO {
 }
 
 type APIResult = Result<HttpResponse, Box<dyn std::error::Error>>;
+type AsyncVoidResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+async fn store_redis(redis_pool: web::Data<deadpool_redis::Pool>, id: String, body: String) -> AsyncVoidResult {
+    let mut redis_conn = redis_pool.get().await?;
+    deadpool_redis::cmd("SET").arg(&[id.clone(), body.clone()]).execute_async(&mut redis_conn).await?;
+    Ok(())
+}
 
 #[actix_web::post("/pessoas")]
-async fn criar_pessoa(pool: web::Data<Pool>, payload: web::Json<CriarPessoaDTO>) -> APIResult {
+async fn criar_pessoa(pool: web::Data<Pool>, redis_pool: web::Data<deadpool_redis::Pool>, payload: web::Json<CriarPessoaDTO>) -> APIResult {
     let conn = pool.get().await?;
     let id = uuid::Uuid::new_v4().to_string();
     let stack = match &payload.stack {
@@ -53,11 +60,20 @@ async fn criar_pessoa(pool: web::Data<Pool>, payload: web::Json<CriarPessoaDTO>)
     if NaiveDate::parse_from_str(&payload.nascimento, "%Y-%m-%d").is_err() {
         return Ok(HttpResponse::BadRequest().body("{\"error\": \"DATA INVALIDA\"}"))
     }
-    if conn.execute("INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK) VALUES (?, ?, ?, ?, ?);", &[
+    if conn.execute("INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK) VALUES ($1, $2, $3, $4, $5);", &[
         &id, &payload.apelido, &payload.nome, &payload.nascimento, &stack
     ]).await.is_err() {
         return Ok(HttpResponse::UnprocessableEntity().finish())
     };
+    let dto = PessoaDTO {
+        id: id.clone(),
+        apelido: payload.apelido.clone(),
+        nome: payload.nome.clone(),
+        nascimento: payload.nascimento.clone(),
+        stack: payload.stack.clone()
+    };
+    let body = serde_json::to_string(&dto)?;
+    tokio::spawn(store_redis(redis_pool, id.clone(), body));
     Ok(
         HttpResponse::Created()
             .append_header(("Location", format!("/pessoas/{id}")))
@@ -66,21 +82,22 @@ async fn criar_pessoa(pool: web::Data<Pool>, payload: web::Json<CriarPessoaDTO>)
 }
 
 #[actix_web::get("/pessoas/{id}")]
-async fn consultar_pessoa(id: web::Path<String>, pool: web::Data<Pool>) -> APIResult {
+async fn consultar_pessoa(id: web::Path<String>, pool: web::Data<Pool>, redis_pool: web::Data<deadpool_redis::Pool>) -> APIResult {
     let id = id.to_string();
-    match tokio::fs::read(&id).await {
+    let mut redis_conn = redis_pool.get().await?;
+    match deadpool_redis::cmd("GET").arg(&[id.clone()]).query_async::<String>(&mut redis_conn).await {
         Err(_) => (),
         Ok(bytes) => return Ok(HttpResponse::Ok().body(bytes))
     };
     let conn = pool.get().await?;
-    let rows = conn.query("SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.ID = ?;", &[&id]).await?;
+    let rows = conn.query("SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.ID = $1;", &[&id]).await?;
     if rows.len() == 0 {
         return Ok(HttpResponse::NotFound().finish());
     }
     let row = &rows[0];
     let dto = PessoaDTO::from(row);
     let body = serde_json::to_string(&dto)?;
-    tokio::spawn(tokio::fs::write(id, body.clone()));
+    tokio::spawn(store_redis(redis_pool, id.clone(), body.clone()));
     Ok(HttpResponse::Ok().body(body))
 }
 
@@ -98,7 +115,7 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
     let nome = format!("%{t}%");
     let stack = format!("%,{t},%");
     let rows = conn.query(
-        "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE UPPER(P.APELIDO) LIKE ? OR UPPER(P.NOME) LIKE ? OR UPPER(',' || P.STACK || ',') LIKE ? LIMIT 50;", &[
+        "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE UPPER(P.APELIDO) LIKE $1 OR UPPER(P.NOME) LIKE $2 OR UPPER(',' || P.STACK || ',') LIKE $3 LIMIT 50;", &[
             &apelido, &nome, &stack
         ]).await?;
     let result = rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>();
@@ -109,26 +126,46 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
 #[actix_web::get("/contagem-pessoas")]
 async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
     let conn = pool.get().await?;
-    let rows = &conn.query("SELECT COUNT() FROM PESSOAS;", &[]).await?;
+    let rows = &conn.query("SELECT COUNT(*) FROM PESSOAS;", &[]).await?;
     let count: String = rows[0].get(0);
     Ok(HttpResponse::Ok().body(count))
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> AsyncVoidResult {
     
     let mut cfg = Config::new();
-    cfg.host = Some("rinhahost".to_string());
+    cfg.host = Some("db".to_string());
     cfg.dbname = Some("rinhadb".to_string());
     cfg.user = Some("root".to_string());
     cfg.password = Some("1234".to_string());
     let pc = PoolConfig::new(50);
     cfg.pool = pc.into();
-    let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
+    println!("creating postgres pool...");
+    let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
+    println!("postgres pool succesfully created");
+
+    pool.get().await?.execute(
+        "CREATE TABLE IF NOT EXISTS PESSOAS (
+            ID CHAR(32) CONSTRAINT ID_PK PRIMARY KEY,
+            APELIDO VARCHAR(32),
+            NOME VARCHAR(100),
+            NASCIMENTO CHAR(10),
+            STACK VARCHAR(1024),
+            CONSTRAINT APELIDO_UNIQUE UNIQUE (APELIDO)
+        );",
+    &[]).await?;
+
+    let mut cfg = deadpool_redis::Config::default();
+    cfg.url = Some("redis://172.17.0.1:6379".into());
+    println!("creating redis pool...");
+    let redis_pool = cfg.create_pool()?;
+    println!("redis pool succesfully created");
 
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(redis_pool.clone()))
             .service(criar_pessoa)
             .service(consultar_pessoa)
             .service(buscar_pessoas)
@@ -137,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .keep_alive(KeepAlive::Os)
     .client_request_timeout(Duration::from_secs(0))
     .backlog(1024)
-    .bind("0.0.0.0:8080")?
+    .bind("0.0.0.0:80")?
     .run()
     .await?;
 

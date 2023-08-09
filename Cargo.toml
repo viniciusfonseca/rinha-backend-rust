@@ -14,3 +14,4 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1.4", features = ["v4"] }
 chrono = "0.4"
+deadpool-redis = "0.6.1"
