@@ -6,6 +6,7 @@ services:
     hostname: api01
     depends_on:
       - db
+      - redis
     expose:
       - "80"
     deploy:
@@ -19,6 +20,7 @@ services:
     hostname: api02
     depends_on:
       - db
+      - redis
     expose:
       - "80"
     deploy:

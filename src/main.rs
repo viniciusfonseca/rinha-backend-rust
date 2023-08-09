@@ -186,8 +186,13 @@ async fn main() -> AsyncVoidResult {
     let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
     println!("postgres pool succesfully created");
 
-    {
-        let conn = pool.get().await?;
+    loop {
+        let conn = pool.get().await;
+        if conn.is_err() {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        let conn = conn?;
         let _ = conn.execute(
             "CREATE TABLE IF NOT EXISTS PESSOAS (
                 ID VARCHAR(36),
@@ -201,6 +206,7 @@ async fn main() -> AsyncVoidResult {
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS IDX_PESSOAS_APELIDO ON PESSOAS (LOWER(APELIDO) VARCHAR_PATTERN_OPS);", &[]).await;
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS IDX_PESSOAS_NOME ON PESSOAS (LOWER(NOME) VARCHAR_PATTERN_OPS);", &[]).await;
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS IDX_PESSOAS_STACK ON PESSOAS (LOWER(STACK) VARCHAR_PATTERN_OPS);", &[]).await;
+        break;
     }
 
     let mut cfg = deadpool_redis::Config::default();
