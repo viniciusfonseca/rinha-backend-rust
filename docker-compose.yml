@@ -2,7 +2,7 @@ version: '3.5'
 
 services:
   api01: # API - Instância 01
-    image: rinhabackend
+    image: distanteagle16/rinhabackend:latest
     hostname: api01
     depends_on:
       - db
@@ -15,7 +15,7 @@ services:
           memory: '0.5GB'
 
   api02: # API - Instância 02
-    image: rinhabackend
+    image: distanteagle16/rinhabackend:latest
     hostname: api02
     depends_on:
       - db

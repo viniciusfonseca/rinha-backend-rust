@@ -49,22 +49,55 @@ async fn store_redis(redis_pool: web::Data<deadpool_redis::Pool>, id: String, bo
     Ok(())
 }
 
+async fn store_redis_apelido(redis_pool: web::Data<deadpool_redis::Pool>, redis_key: String) -> AsyncVoidResult {
+    {
+        let mut redis_conn = redis_pool.get().await?;
+        let _ = deadpool_redis::cmd("SET").arg(&[redis_key.clone(), "0".into()]).execute_async(&mut redis_conn).await;
+    }
+    Ok(())
+}
+
 #[actix_web::post("/pessoas")]
 async fn criar_pessoa(pool: web::Data<Pool>, redis_pool: web::Data<deadpool_redis::Pool>, payload: web::Json<CriarPessoaDTO>) -> APIResult {
-    let conn = pool.get().await?;
     let id = uuid::Uuid::new_v4().to_string();
+    if NaiveDate::parse_from_str(&payload.nascimento, "%Y-%m-%d").is_err() {
+        return Ok(HttpResponse::BadRequest().body("{\"error\": \"DATA INVALIDA\"}"))
+    }
+    if payload.nome.len() > 100 {
+        return Ok(HttpResponse::BadRequest().body("{\"error\": \"NOME POSSUI MAIS DE 100 CARACTERES\"}"));
+    }
+    if payload.apelido.len() > 32 {
+        return Ok(HttpResponse::BadRequest().body("{\"error\": \"APELIDO POSSUI MAIS DE 100 CARACTERES\"}"));
+    }
+    if let Some(stack) = &payload.stack {
+        for element in stack.clone() {
+            if element.len() > 32 {
+                return Ok(HttpResponse::BadRequest().body("{\"error\": \"UMA DAS TECNOLOGIAS INFORMADAS POSSUI MAIS DE 32 CARACTERES\"}"));
+            }
+        }
+    }
     let stack = match &payload.stack {
         Some(v) => Some(v.join(",")),
         None => None
     };
-    if NaiveDate::parse_from_str(&payload.nascimento, "%Y-%m-%d").is_err() {
-        return Ok(HttpResponse::BadRequest().body("{\"error\": \"DATA INVALIDA\"}"))
+    let redis_key = format!("a/{}", payload.apelido.clone());
+    {
+        let mut redis_conn = redis_pool.get().await?;
+        match deadpool_redis::cmd("GET").arg(&[redis_key.clone()]).query_async::<String>(&mut redis_conn).await {
+            Ok(_) => return Ok(HttpResponse::UnprocessableEntity().finish()),
+            Err(_) => ()
+        };
     }
-    if conn.execute("INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK) VALUES ($1, $2, $3, $4, $5);", &[
-        &id, &payload.apelido, &payload.nome, &payload.nascimento, &stack
-    ]).await.is_err() {
-        return Ok(HttpResponse::UnprocessableEntity().finish())
-    };
+    {
+        let conn = pool.get().await?;
+        let result = conn.execute("INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK) VALUES ($1, $2, $3, $4, $5);", &[
+            &id, &payload.apelido, &payload.nome, &payload.nascimento, &stack
+        ]).await;
+        if result.is_err() {
+            return Ok(HttpResponse::UnprocessableEntity().finish());
+        };
+    }
+    tokio::spawn(store_redis_apelido(redis_pool.clone(), redis_key.clone()));
     let dto = PessoaDTO {
         id: id.clone(),
         apelido: payload.apelido.clone(),
@@ -84,18 +117,22 @@ async fn criar_pessoa(pool: web::Data<Pool>, redis_pool: web::Data<deadpool_redi
 #[actix_web::get("/pessoas/{id}")]
 async fn consultar_pessoa(id: web::Path<String>, pool: web::Data<Pool>, redis_pool: web::Data<deadpool_redis::Pool>) -> APIResult {
     let id = id.to_string();
-    let mut redis_conn = redis_pool.get().await?;
-    match deadpool_redis::cmd("GET").arg(&[id.clone()]).query_async::<String>(&mut redis_conn).await {
-        Err(_) => (),
-        Ok(bytes) => return Ok(HttpResponse::Ok().body(bytes))
-    };
-    let conn = pool.get().await?;
-    let rows = conn.query("SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.ID = $1;", &[&id]).await?;
-    if rows.len() == 0 {
-        return Ok(HttpResponse::NotFound().finish());
+    {
+        let mut redis_conn = redis_pool.get().await?;
+        match deadpool_redis::cmd("GET").arg(&[id.clone()]).query_async::<String>(&mut redis_conn).await {
+            Err(_) => (),
+            Ok(bytes) => return Ok(HttpResponse::Ok().body(bytes))
+        };
     }
-    let row = &rows[0];
-    let dto = PessoaDTO::from(row);
+    let dto = {
+        let conn = pool.get().await?;
+        let rows = conn.query("SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.ID = $1;", &[&id]).await?;
+        if rows.len() == 0 {
+            return Ok(HttpResponse::NotFound().finish());
+        }
+        let row = &rows[0];
+        PessoaDTO::from(row)
+    };
     let body = serde_json::to_string(&dto)?;
     tokio::spawn(store_redis(redis_pool, id.clone(), body.clone()));
     Ok(HttpResponse::Ok().body(body))
@@ -110,24 +147,28 @@ struct ParametrosBusca {
 async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data<Pool>) -> APIResult {
 
     let conn = pool.get().await?;
-    let t = parametros.t.to_uppercase();
+    let t = parametros.t.to_lowercase();
     let apelido = format!("%{t}%");
     let nome = format!("%{t}%");
     let stack = format!("%,{t},%");
-    let rows = conn.query(
-        "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE UPPER(P.APELIDO) LIKE $1 OR UPPER(P.NOME) LIKE $2 OR UPPER(',' || P.STACK || ',') LIKE $3 LIMIT 50;", &[
-            &apelido, &nome, &stack
-        ]).await?;
-    let result = rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>();
+    let result = {
+        let rows = conn.query(
+            "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE LOWER(P.APELIDO) LIKE $1 OR LOWER(P.NOME) LIKE $2 OR LOWER(',' || P.STACK || ',') LIKE $3 LIMIT 50;", &[
+                &apelido, &nome, &stack
+            ]).await?;
+        rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>()
+    };
     let body = serde_json::to_string(&result)?;
     Ok(HttpResponse::Ok().body(body))
 }
 
 #[actix_web::get("/contagem-pessoas")]
 async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
-    let conn = pool.get().await?;
-    let rows = &conn.query("SELECT COUNT(*) FROM PESSOAS;", &[]).await?;
-    let count: i64 = rows[0].get(0);
+    let count: i64 = {
+        let conn = pool.get().await?;
+        let rows = &conn.query("SELECT COUNT(*) FROM PESSOAS;", &[]).await?;
+        rows[0].get(0)
+    };
     Ok(HttpResponse::Ok().body(count.to_string()))
 }
 
@@ -146,16 +187,20 @@ async fn main() -> AsyncVoidResult {
     println!("postgres pool succesfully created");
 
     {
-        let _ = pool.get().await?.execute(
+        let conn = pool.get().await?;
+        let _ = conn.execute(
             "CREATE TABLE IF NOT EXISTS PESSOAS (
-                ID CHAR(32) CONSTRAINT ID_PK PRIMARY KEY,
-                APELIDO VARCHAR(32),
+                ID VARCHAR(36),
+                APELIDO VARCHAR(32) CONSTRAINT ID_PK PRIMARY KEY,
                 NOME VARCHAR(100),
                 NASCIMENTO CHAR(10),
-                STACK VARCHAR(1024),
-                CONSTRAINT APELIDO_UNIQUE UNIQUE (APELIDO)
+                STACK VARCHAR(1024)
             );",
         &[]).await;
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS IDX_PESSOAS_ID ON PESSOAS USING HASH (ID);", &[]).await;
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS IDX_PESSOAS_APELIDO ON PESSOAS (LOWER(APELIDO) VARCHAR_PATTERN_OPS);", &[]).await;
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS IDX_PESSOAS_NOME ON PESSOAS (LOWER(NOME) VARCHAR_PATTERN_OPS);", &[]).await;
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS IDX_PESSOAS_STACK ON PESSOAS (LOWER(STACK) VARCHAR_PATTERN_OPS);", &[]).await;
     }
 
     let mut cfg = deadpool_redis::Config::default();
@@ -175,7 +220,7 @@ async fn main() -> AsyncVoidResult {
     })
     .keep_alive(KeepAlive::Os)
     .client_request_timeout(Duration::from_secs(0))
-    .backlog(1024)
+    .backlog(2048)
     .bind("0.0.0.0:80")?
     .run()
     .await?;
