@@ -237,7 +237,7 @@ async fn main() -> AsyncVoidResult {
                 ]);
             }
             {
-                let conn = match pool.get().await {
+                let mut conn = match pool.get().await {
                     Ok(x) => x,
                     Err(_) => continue
                 };
@@ -245,7 +245,18 @@ async fn main() -> AsyncVoidResult {
                     Ok(x) => x,
                     Err(_) => continue
                 };
-                let _ = conn.batch_execute(&sql).await;
+                let transaction = match conn.transaction().await {
+                    Ok(x) => x,
+                    Err(_) => continue
+                };
+                match transaction.batch_execute(&sql).await {
+                    Ok(_) => (),
+                    Err(_) => continue
+                };
+                match transaction.commit().await {
+                    Ok(_) => (),
+                    Err(_) => continue
+                };
             }
         }
     });
