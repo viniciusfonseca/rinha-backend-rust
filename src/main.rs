@@ -237,8 +237,14 @@ async fn main() -> AsyncVoidResult {
                 ]);
             }
             {
-                let conn = pool.get().await.expect("error getting conn");
-                let sql = sql_builder.sql().expect("error getting batch sql");
+                let conn = match pool.get().await {
+                    Ok(x) => x,
+                    Err(_) => continue
+                };
+                let sql = match sql_builder.sql() {
+                    Ok(x) => x,
+                    Err(_) => continue
+                };
                 let _ = conn.batch_execute(&sql).await;
             }
         }
