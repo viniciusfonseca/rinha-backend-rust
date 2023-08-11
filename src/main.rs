@@ -50,19 +50,6 @@ async fn store_redis(redis_pool: web::Data<deadpool_redis::Pool>, id: String, bo
     deadpool_redis::cmd("SET").arg(&[id.clone(), body.clone()]).execute_async(&mut redis_conn).await.expect("error saving to redis");
 }
 
-// async fn store_row(pool: web::Data<Pool>, id: String, payload: web::Json<CriarPessoaDTO>, stack: Option<String>) {
-//     let conn = match pool.get().await {
-//         Ok(x) => x,
-//         Err(_) => panic!("error getting pool conn")
-//     };
-//     match conn.execute("INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK, BUSCA) VALUES ($1, $2, $3, $4, $5, $6);", &[
-//         &id, &payload.apelido, &payload.nome, &payload.nascimento, &stack, &format!("{}{}{}", payload.apelido, payload.nome, stack.clone().unwrap_or("".into()))
-//     ]).await {
-//         Ok(_) => (),
-//         Err(e) => panic!("error inserting: {e}")
-//     }
-// }
-
 #[actix_web::post("/pessoas")]
 async fn criar_pessoa(
     redis_pool: web::Data<deadpool_redis::Pool>,
