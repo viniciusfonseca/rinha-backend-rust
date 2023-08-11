@@ -1,8 +1,8 @@
 use std::{time::Duration, sync::Arc};
 use actix_web::{HttpServer, App, web, http::KeepAlive, HttpResponse};
 use chrono::NaiveDate;
-use deadpool_postgres::{Config, Runtime, PoolConfig, Pool, GenericClient};
-use deadqueue::unlimited::Queue;
+use deadpool_postgres::{Config, Runtime, PoolConfig, Pool, GenericClient, Timeouts};
+use deadpool_redis::{ConnectionInfo, RedisConnectionInfo, ConnectionAddr};
 use tokio_postgres::{NoTls, Row};
 use serde::{Deserialize, Serialize};
 use sql_builder::{SqlBuilder, quote};
@@ -45,16 +45,19 @@ impl PessoaDTO {
 type APIResult = Result<HttpResponse, Box<dyn std::error::Error>>;
 type AsyncVoidResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+type QueueEvent = (String, web::Json<CriarPessoaDTO>, Option<String>);
+type AppQueue = deadqueue::unlimited::Queue::<QueueEvent>;
+
 async fn store_redis(redis_pool: web::Data<deadpool_redis::Pool>, id: String, body: String) {
     let mut redis_conn = redis_pool.get().await.expect("error getting redis pool conn");
-    deadpool_redis::cmd("SET").arg(&[id.clone(), body.clone()]).execute_async(&mut redis_conn).await.expect("error saving to redis");
+    deadpool_redis::redis::cmd("SET").arg(&[id.clone(), body.clone()]).query_async::<_, ()>(&mut redis_conn).await.expect("error saving to redis");
 }
 
 #[actix_web::post("/pessoas")]
 async fn criar_pessoa(
     redis_pool: web::Data<deadpool_redis::Pool>,
     payload: web::Json<CriarPessoaDTO>,
-    queue: web::Data<Arc<Queue<QueueEvent>>>
+    queue: web::Data<Arc<AppQueue>>
 ) -> APIResult {
     let id = uuid::Uuid::new_v4().to_string();
     if NaiveDate::parse_from_str(&payload.nascimento, "%Y-%m-%d").is_err() {
@@ -80,11 +83,11 @@ async fn criar_pessoa(
     let redis_key = format!("a/{}", payload.apelido.clone());
     {
         let mut redis_conn = redis_pool.get().await?;
-        match deadpool_redis::cmd("GET").arg(&[redis_key.clone()]).query_async::<String>(&mut redis_conn).await {
+        match deadpool_redis::redis::cmd("GET").arg(&[redis_key.clone()]).query_async::<_, String>(&mut redis_conn).await {
             Ok(_) => return Ok(HttpResponse::UnprocessableEntity().finish()),
             Err(_) => ()    
         };
-        let _ = deadpool_redis::cmd("SET").arg(&[redis_key.clone(), "0".into()]).execute_async(&mut redis_conn).await;
+        let _ = deadpool_redis::redis::cmd("SET").arg(&[redis_key.clone(), "0".into()]).query_async::<_, ()>(&mut redis_conn).await;
     }
     let apelido = payload.apelido.clone();
     let nome = payload.nome.clone();
@@ -114,7 +117,7 @@ async fn consultar_pessoa(id: web::Path<String>, pool: web::Data<Pool>, redis_po
     let id = id.to_string();
     {
         let mut redis_conn = redis_pool.get().await?;
-        match deadpool_redis::cmd("GET").arg(&[id.clone()]).query_async::<String>(&mut redis_conn).await {
+        match deadpool_redis::redis::cmd("GET").arg(&[id.clone()]).query_async::<_, String>(&mut redis_conn).await {
             Err(_) => (),
             Ok(bytes) => return Ok(HttpResponse::Ok().body(bytes))
         };
@@ -163,7 +166,6 @@ async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
     Ok(HttpResponse::Ok().body(count.to_string()))
 }
 
-type QueueEvent = (String, web::Json<CriarPessoaDTO>, Option<String>);
 
 #[tokio::main]
 async fn main() -> AsyncVoidResult {
@@ -202,13 +204,28 @@ async fn main() -> AsyncVoidResult {
     }
 
     let mut cfg = deadpool_redis::Config::default();
-    cfg.url = Some("redis://172.17.0.1:6379".into());
+    cfg.connection = Some(ConnectionInfo {
+        addr: ConnectionAddr::Tcp("172.17.0.1".into(), 6379),
+        redis: RedisConnectionInfo {
+            db: 0,
+            username: None,
+            password: None
+        }
+    });
+    cfg.pool = Some(PoolConfig {
+        max_size: 12,
+        timeouts: Timeouts {
+            wait: Some(Duration::from_secs(2)),
+            create: None,
+            recycle: Some(Duration::from_secs(2))
+        }
+    });
     println!("creating redis pool...");
-    let redis_pool = cfg.create_pool()?;
+    let redis_pool = cfg.create_pool(Some(Runtime::Tokio1))?;
     println!("redis pool succesfully created");
     let pool_async = pool.clone();
 
-    let queue = Arc::new(deadqueue::unlimited::Queue::<QueueEvent>::new());
+    let queue = Arc::new(AppQueue::new());
     let queue_async = queue.clone();
     tokio::spawn(async move {
         loop {
@@ -253,10 +270,7 @@ async fn main() -> AsyncVoidResult {
                     Ok(_) => (),
                     Err(_) => continue
                 };
-                match transaction.commit().await {
-                    Ok(_) => (),
-                    Err(_) => continue
-                };
+                let _ = transaction.commit().await;
             }
         }
     });
