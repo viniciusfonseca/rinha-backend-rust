@@ -145,10 +145,10 @@ struct ParametrosBusca {
 async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data<Pool>) -> APIResult {
 
     let conn = pool.get().await?;
-    let t = parametros.t.to_lowercase();
+    let t = format!("%{}%", parametros.t.to_lowercase());
     let result = {
         let rows = conn.query(
-            "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE LOWER(P.BUSCA) LIKE $1 LIMIT 50;", &[&t]
+            "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.BUSCA LIKE $1 LIMIT 50;", &[&t]
         ).await?;
         rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>()
     };
@@ -180,28 +180,6 @@ async fn main() -> AsyncVoidResult {
     println!("creating postgres pool...");
     let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
     println!("postgres pool succesfully created");
-
-    loop {
-        let conn = pool.get().await;
-        if conn.is_err() {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            continue;
-        }
-        let conn = conn?;
-        let _ = conn.batch_execute("
-            CREATE TABLE IF NOT EXISTS PESSOAS (
-                ID VARCHAR(36),
-                APELIDO VARCHAR(32) CONSTRAINT ID_PK PRIMARY KEY,
-                NOME VARCHAR(100),
-                NASCIMENTO CHAR(10),
-                STACK VARCHAR(1024),
-                BUSCA TEXT
-            );
-            CREATE INDEX IF NOT EXISTS IDX_PESSOAS_ID ON PESSOAS USING HASH (ID);
-            CREATE INDEX IF NOT EXISTS IDX_PESSOAS_BUSCA ON PESSOAS (LOWER(BUSCA) VARCHAR_PATTERN_OPS);
-        ").await;
-        break;
-    }
 
     let mut cfg = deadpool_redis::Config::default();
     cfg.connection = Some(ConnectionInfo {
@@ -243,7 +221,7 @@ async fn main() -> AsyncVoidResult {
             let pool = pool_async.clone();
             while queue.len() > 0 {
                 let (id, payload, stack) = queue.pop().await;
-                let busca = format!("{}{}{}", payload.apelido, payload.nome, stack.clone().unwrap_or("".into()));
+                let busca = format!("{}{}{}", payload.apelido, payload.nome, stack.clone().unwrap_or("".into())).to_lowercase();
                 sql_builder.values(&[
                     &quote(id),
                     &quote(&payload.apelido),
