@@ -30,7 +30,7 @@ impl PessoaDTO {
         let stack: Option<String> = row.get(4);
         let stack = match stack {
             None => None,
-            Some(s) => Some(s.split(',').map(|s| s.to_string()).collect())
+            Some(s) => Some(s.split(' ').map(|s| s.to_string()).collect())
         };
         PessoaDTO {
             id: row.get(0),
@@ -77,7 +77,7 @@ async fn criar_pessoa(
         }
     }
     let stack = match &payload.stack {
-        Some(v) => Some(v.join(",")),
+        Some(v) => Some(v.join(" ")),
         None => None
     };
     let redis_key = format!("a/{}", payload.apelido.clone());
@@ -144,11 +144,11 @@ struct ParametrosBusca {
 #[actix_web::get("/pessoas")]
 async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data<Pool>) -> APIResult {
 
-    let conn = pool.get().await?;
-    let t = format!("%{}%", parametros.t.to_lowercase());
+    let t = format!("{}", parametros.t.replace(' ', "*"));
     let result = {
+        let conn = pool.get().await?;
         let rows = conn.query(
-            "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.BUSCA LIKE $1 LIMIT 50;", &[&t]
+            "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE TO_TSQUERY('BUSCA', $1) @@ BUSCA LIMIT 50;", &[&t]
         ).await?;
         rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>()
     };
@@ -160,7 +160,7 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
 async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
     let count: i64 = {
         let conn = pool.get().await?;
-        let rows = &conn.query("SELECT COUNT(*) FROM PESSOAS;", &[]).await?;
+        let rows = &conn.query("SELECT COUNT(1) FROM PESSOAS;", &[]).await?;
         rows[0].get(0)
     };
     Ok(HttpResponse::Ok().body(count.to_string()))
@@ -216,19 +216,16 @@ async fn main() -> AsyncVoidResult {
                 .field("APELIDO")
                 .field("NOME")
                 .field("NASCIMENTO")
-                .field("STACK")
-                .field("BUSCA");
+                .field("STACK");
             let pool = pool_async.clone();
             while queue.len() > 0 {
                 let (id, payload, stack) = queue.pop().await;
-                let busca = format!("{}{}{}", payload.apelido, payload.nome, stack.clone().unwrap_or("".into())).to_lowercase();
                 sql_builder.values(&[
                     &quote(id),
                     &quote(&payload.apelido),
                     &quote(&payload.nome),
                     &quote(&payload.nascimento),
-                    &quote(stack.unwrap_or("".into())),
-                    &quote(busca)
+                    &quote(stack.unwrap_or("".into()))
                 ]);
             }
             {
