@@ -1,4 +1,4 @@
-use std::{time::Duration, sync::Arc};
+use std::{time::Duration, sync::Arc, collections::HashSet};
 use actix_web::{HttpServer, App, web, http::KeepAlive, HttpResponse};
 use chrono::NaiveDate;
 use deadpool_postgres::{Config, Runtime, PoolConfig, Pool, GenericClient, Timeouts};
@@ -158,14 +158,53 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
 
 #[actix_web::get("/contagem-pessoas")]
 async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
-    let count: i64 = {
-        let conn = pool.get().await?;
-        let rows = &conn.query("SELECT COUNT(1) FROM PESSOAS;", &[]).await?;
-        rows[0].get(0)
-    };
+    let conn = pool.get().await?;
+    let rows = &conn.query("SELECT COUNT(1) FROM PESSOAS;", &[]).await?;
+    let count: i64 = rows[0].get(0);
     Ok(HttpResponse::Ok().body(count.to_string()))
 }
 
+async fn batch_insert(pool: Pool, queue: Arc<AppQueue>) {
+    let mut sql_builder = SqlBuilder::insert_into("PESSOAS");
+    sql_builder
+        .field("ID")
+        .field("APELIDO")
+        .field("NOME")
+        .field("NASCIMENTO")
+        .field("STACK");
+    let mut apelidos = HashSet::<String>::new();
+    while queue.len() > 0 {
+        let (id, payload, stack) = queue.pop().await;
+        if apelidos.contains(&payload.apelido) { continue }
+        apelidos.insert(payload.apelido.clone());
+        sql_builder.values(&[
+            &quote(id),
+            &quote(&payload.apelido),
+            &quote(&payload.nome),
+            &quote(&payload.nascimento),
+            &quote(stack.unwrap_or("".into()))
+        ]);
+    }
+    {
+        let mut conn = match pool.get().await {
+            Ok(x) => x,
+            Err(_) => return
+        };
+        let sql = match sql_builder.sql() {
+            Ok(x) => x,
+            Err(_) => return
+        };
+        let transaction = match conn.transaction().await {
+            Ok(x) => x,
+            Err(_) => return
+        };
+        match transaction.batch_execute(&sql).await {
+            Ok(_) => (),
+            Err(_) => return
+        };
+        let _ = transaction.commit().await;
+    }
+}
 
 #[tokio::main]
 async fn main() -> AsyncVoidResult {
@@ -175,7 +214,7 @@ async fn main() -> AsyncVoidResult {
     cfg.dbname = Some("rinhadb".to_string());
     cfg.user = Some("root".to_string());
     cfg.password = Some("1234".to_string());
-    let pc = PoolConfig::new(50);
+    let pc = PoolConfig::new(30);
     cfg.pool = pc.into();
     println!("creating postgres pool...");
     let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
@@ -210,43 +249,7 @@ async fn main() -> AsyncVoidResult {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let queue = queue_async.clone();
             if queue.len() == 0 { continue }
-            let mut sql_builder = SqlBuilder::insert_into("PESSOAS");
-            sql_builder
-                .field("ID")
-                .field("APELIDO")
-                .field("NOME")
-                .field("NASCIMENTO")
-                .field("STACK");
-            let pool = pool_async.clone();
-            while queue.len() > 0 {
-                let (id, payload, stack) = queue.pop().await;
-                sql_builder.values(&[
-                    &quote(id),
-                    &quote(&payload.apelido),
-                    &quote(&payload.nome),
-                    &quote(&payload.nascimento),
-                    &quote(stack.unwrap_or("".into()))
-                ]);
-            }
-            {
-                let mut conn = match pool.get().await {
-                    Ok(x) => x,
-                    Err(_) => continue
-                };
-                let sql = match sql_builder.sql() {
-                    Ok(x) => x,
-                    Err(_) => continue
-                };
-                let transaction = match conn.transaction().await {
-                    Ok(x) => x,
-                    Err(_) => continue
-                };
-                match transaction.batch_execute(&sql).await {
-                    Ok(_) => (),
-                    Err(_) => continue
-                };
-                let _ = transaction.commit().await;
-            }
+            batch_insert(pool_async.clone(), queue).await;
         }
     });
 
