@@ -158,6 +158,7 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
 
 #[actix_web::get("/contagem-pessoas")]
 async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let conn = pool.get().await?;
     let rows = &conn.query("SELECT COUNT(1) FROM PESSOAS;", &[]).await?;
     let count: i64 = rows[0].get(0);
