@@ -190,10 +190,12 @@ async fn batch_insert(pool: Pool, queue: Arc<AppQueue>) {
             Ok(x) => x,
             Err(_) => return
         };
-        let sql = match sql_builder.sql() {
+        let mut sql = match sql_builder.sql() {
             Ok(x) => x,
             Err(_) => return
         };
+        sql.pop();
+        sql.push_str("ON CONFLICT DO NOTHING;");
         let transaction = match conn.transaction().await {
             Ok(x) => x,
             Err(_) => return
