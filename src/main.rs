@@ -48,47 +48,40 @@ type AsyncVoidResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 type QueueEvent = (String, web::Json<CriarPessoaDTO>, Option<String>);
 type AppQueue = deadqueue::unlimited::Queue::<QueueEvent>;
 
-async fn store_redis(redis_pool: web::Data<deadpool_redis::Pool>, id: String, body: String) {
-    let mut redis_conn = redis_pool.get().await.expect("error getting redis pool conn");
-    deadpool_redis::redis::cmd("SET").arg(&[id.clone(), body.clone()]).query_async::<_, ()>(&mut redis_conn).await.expect("error saving to redis");
-}
-
 #[actix_web::post("/pessoas")]
 async fn criar_pessoa(
     redis_pool: web::Data<deadpool_redis::Pool>,
     payload: web::Json<CriarPessoaDTO>,
     queue: web::Data<Arc<AppQueue>>
 ) -> APIResult {
-    let id = uuid::Uuid::new_v4().to_string();
-    if NaiveDate::parse_from_str(&payload.nascimento, "%Y-%m-%d").is_err() {
-        return Ok(HttpResponse::BadRequest().body("{\"error\": \"DATA INVALIDA\"}"))
-    }
+    let redis_key = format!("a/{}", payload.apelido.clone());
+    let mut redis_conn = redis_pool.get().await?;
+    match deadpool_redis::redis::cmd("GET").arg(&[redis_key.clone()]).query_async::<_, String>(&mut redis_conn).await {
+        Ok(_) => return Ok(HttpResponse::UnprocessableEntity().finish()),
+        Err(_) => ()    
+    };
     if payload.nome.len() > 100 {
-        return Ok(HttpResponse::BadRequest().body("{\"error\": \"NOME POSSUI MAIS DE 100 CARACTERES\"}"));
+        return Ok(HttpResponse::BadRequest().finish());
     }
     if payload.apelido.len() > 32 {
-        return Ok(HttpResponse::BadRequest().body("{\"error\": \"APELIDO POSSUI MAIS DE 100 CARACTERES\"}"));
+        return Ok(HttpResponse::BadRequest().finish());
+    }
+    if NaiveDate::parse_from_str(&payload.nascimento, "%Y-%m-%d").is_err() {
+        return Ok(HttpResponse::BadRequest().finish());
     }
     if let Some(stack) = &payload.stack {
         for element in stack.clone() {
             if element.len() > 32 {
-                return Ok(HttpResponse::BadRequest().body("{\"error\": \"UMA DAS TECNOLOGIAS INFORMADAS POSSUI MAIS DE 32 CARACTERES\"}"));
+                return Ok(HttpResponse::BadRequest().finish());
             }
         }
     }
+    let _ = deadpool_redis::redis::cmd("SET").arg(&[redis_key.clone(), "0".into()]).query_async::<_, ()>(&mut redis_conn).await;
+    let id = uuid::Uuid::new_v4().to_string();
     let stack = match &payload.stack {
         Some(v) => Some(v.join(" ")),
         None => None
     };
-    let redis_key = format!("a/{}", payload.apelido.clone());
-    {
-        let mut redis_conn = redis_pool.get().await?;
-        match deadpool_redis::redis::cmd("GET").arg(&[redis_key.clone()]).query_async::<_, String>(&mut redis_conn).await {
-            Ok(_) => return Ok(HttpResponse::UnprocessableEntity().finish()),
-            Err(_) => ()    
-        };
-        let _ = deadpool_redis::redis::cmd("SET").arg(&[redis_key.clone(), "0".into()]).query_async::<_, ()>(&mut redis_conn).await;
-    }
     let apelido = payload.apelido.clone();
     let nome = payload.nome.clone();
     let nascimento = payload.nascimento.clone();
@@ -101,7 +94,9 @@ async fn criar_pessoa(
         stack: stack_vec
     };
     let body = serde_json::to_string(&dto)?;
-    store_redis(redis_pool.clone(), id.clone(), body).await;
+    deadpool_redis::redis::cmd("SET")
+        .arg(&[id.clone(), body.clone()]).query_async::<_, ()>(&mut redis_conn)
+        .await?;
     queue.push((id.clone(), payload, stack));
     // tokio::spawn(store_row(pool, id.clone(), payload, stack));
     
@@ -132,7 +127,13 @@ async fn consultar_pessoa(id: web::Path<String>, pool: web::Data<Pool>, redis_po
         PessoaDTO::from(row)
     };
     let body = serde_json::to_string(&dto)?;
-    tokio::spawn(store_redis(redis_pool, id.clone(), body.clone()));
+    let body_async = body.clone();
+    tokio::spawn(async move {
+        let mut redis_conn = redis_pool.get().await.expect("error getting redis conn");
+        let _ = deadpool_redis::redis::cmd("SET")
+            .arg(&[id.clone(), body_async]).query_async::<_, ()>(&mut redis_conn)
+            .await;
+    });
     Ok(HttpResponse::Ok().body(body))
 }
 
@@ -248,6 +249,24 @@ async fn main() -> AsyncVoidResult {
     let queue = Arc::new(AppQueue::new());
     let queue_async = queue.clone();
     tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        {
+            let http_client = reqwest::Client::new();
+            let nginx_url = "http://172.17.0.1:9999/pessoas";
+            let mount_body = |n: u16| format!("{{\"apelido\":\"vaf{n}\",\"nascimento\":\"1999-01-01\",\"nome\":\"VAF\"}}");
+            let mut f = vec![];
+            let v = vec![0, 1, 2, 1, 0];
+            for i in 0..511 {
+                for j in &v {
+                    f.push(http_client.post(nginx_url)
+                        .body(mount_body(j + i))
+                        .header("Content-Type", "application/json")
+                        .send());
+                }
+            }
+            futures::future::join_all(f).await;
+            pool_async.get().await.unwrap().execute("DELETE FROM PESSOAS;", &[]).await.unwrap();
+        }
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let queue = queue_async.clone();

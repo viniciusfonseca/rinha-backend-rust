@@ -12,9 +12,11 @@ deadpool-postgres = "0.10"
 tokio-postgres = "0.7.8"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-uuid = { version = "1.4", features = ["v4"] }
+uuid = { version = "1.4", features = ["v4", "fast-rng"] }
 chrono = "0.4"
 deadpool-redis = { version = "0.12", features = ["serde"] }
 config = "0.13.3"
 deadqueue = "0.2"
 sql-builder = "3.1"
+reqwest = "0.11"
+futures = "0.3"
