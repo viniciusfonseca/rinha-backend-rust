@@ -98,7 +98,6 @@ async fn criar_pessoa(
         .arg(&[id.clone(), body.clone()]).query_async::<_, ()>(&mut redis_conn)
         .await?;
     queue.push((id.clone(), payload, stack));
-    // tokio::spawn(store_row(pool, id.clone(), payload, stack));
     
     Ok(
         HttpResponse::Created()
@@ -145,12 +144,10 @@ struct ParametrosBusca {
 #[actix_web::get("/pessoas")]
 async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data<Pool>) -> APIResult {
 
-    // let t = format!("{}:*", parametros.t.replace(' ', "*"));
-    let t = format!("%{}%", parametros.t.to_lowercase().replace(' ', "*"));
+    let t = format!("%{}%", parametros.t.to_lowercase());
     let result = {
         let conn = pool.get().await?;
         let rows = conn.query(
-            // "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE TO_TSQUERY('BUSCA', $1) @@ BUSCA LIMIT 50;", &[&t]
             "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.BUSCA_TRGM LIKE $1 LIMIT 50;", &[&t]
         ).await?;
         rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>()
