@@ -1,11 +1,10 @@
-use std::{time::Duration, sync::Arc, collections::HashSet};
+use std::{time::Duration, sync::Arc};
 use actix_web::{HttpServer, App, web, http::KeepAlive, HttpResponse};
 use chrono::NaiveDate;
 use deadpool_postgres::{Config, Runtime, PoolConfig, Pool, GenericClient, Timeouts};
 use deadpool_redis::{ConnectionInfo, RedisConnectionInfo, ConnectionAddr};
 use tokio_postgres::{NoTls, Row};
 use serde::{Deserialize, Serialize};
-use sql_builder::{SqlBuilder, quote};
 
 #[derive(Deserialize)]
 struct CriarPessoaDTO {
@@ -50,9 +49,10 @@ type AppQueue = deadqueue::unlimited::Queue::<QueueEvent>;
 
 #[actix_web::post("/pessoas")]
 async fn criar_pessoa(
+    pool: web::Data<Pool>,
     redis_pool: web::Data<deadpool_redis::Pool>,
     payload: web::Json<CriarPessoaDTO>,
-    queue: web::Data<Arc<AppQueue>>
+    // queue: web::Data<Arc<AppQueue>>
 ) -> APIResult {
     let redis_key = format!("a/{}", payload.apelido.clone());
     let mut redis_conn = redis_pool.get().await?;
@@ -97,7 +97,14 @@ async fn criar_pessoa(
     deadpool_redis::redis::cmd("SET")
         .arg(&[id.clone(), body.clone()]).query_async::<_, ()>(&mut redis_conn)
         .await?;
-    queue.push((id.clone(), payload, stack));
+    tokio::spawn(async move {
+        let conn = pool.get().await.expect("error getting conn");
+        let _ = conn.execute("
+            INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT DO NOTHING;
+        ", &[&dto.id, &dto.apelido, &dto.nome, &dto.nascimento, &stack]).await;
+    });
     
     Ok(
         HttpResponse::Created()
@@ -118,21 +125,26 @@ async fn consultar_pessoa(id: web::Path<String>, pool: web::Data<Pool>, redis_po
     }
     let dto = {
         let conn = pool.get().await?;
-        let rows = conn.query("SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.ID = $1;", &[&id]).await?;
+        let rows = conn.query("
+            SELECT ID, APELIDO, NOME, NASCIMENTO, STACK
+            FROM PESSOAS P
+            WHERE P.ID = $1;
+        ", &[&id]).await?;
         if rows.len() == 0 {
             return Ok(HttpResponse::NotFound().finish());
         }
-        let row = &rows[0];
-        PessoaDTO::from(row)
+        PessoaDTO::from(&rows[0])
     };
     let body = serde_json::to_string(&dto)?;
     let body_async = body.clone();
-    tokio::spawn(async move {
+    // tokio::spawn(async move 
+    {
         let mut redis_conn = redis_pool.get().await.expect("error getting redis conn");
         let _ = deadpool_redis::redis::cmd("SET")
             .arg(&[id.clone(), body_async]).query_async::<_, ()>(&mut redis_conn)
             .await;
-    });
+    }
+    // );
     Ok(HttpResponse::Ok().body(body))
 }
 
@@ -147,9 +159,12 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
     let t = format!("%{}%", parametros.t.to_lowercase());
     let result = {
         let conn = pool.get().await?;
-        let rows = conn.query(
-            "SELECT ID, APELIDO, NOME, NASCIMENTO, STACK FROM PESSOAS P WHERE P.BUSCA_TRGM LIKE $1 LIMIT 50;", &[&t]
-        ).await?;
+        let rows = conn.query("
+            SELECT ID, APELIDO, NOME, NASCIMENTO, STACK
+            FROM PESSOAS P
+            WHERE P.BUSCA_TRGM LIKE $1
+            LIMIT 50;
+        ", &[&t]).await?;
         rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>()
     };
     let body = serde_json::to_string(&result)?;
@@ -163,50 +178,6 @@ async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
     let rows = &conn.query("SELECT COUNT(1) FROM PESSOAS;", &[]).await?;
     let count: i64 = rows[0].get(0);
     Ok(HttpResponse::Ok().body(count.to_string()))
-}
-
-async fn batch_insert(pool: Pool, queue: Arc<AppQueue>) {
-    let mut sql_builder = SqlBuilder::insert_into("PESSOAS");
-    sql_builder
-        .field("ID")
-        .field("APELIDO")
-        .field("NOME")
-        .field("NASCIMENTO")
-        .field("STACK");
-    let mut apelidos = HashSet::<String>::new();
-    while queue.len() > 0 {
-        let (id, payload, stack) = queue.pop().await;
-        if apelidos.contains(&payload.apelido) { continue }
-        apelidos.insert(payload.apelido.clone());
-        sql_builder.values(&[
-            &quote(id),
-            &quote(&payload.apelido),
-            &quote(&payload.nome),
-            &quote(&payload.nascimento),
-            &quote(stack.unwrap_or("".into()))
-        ]);
-    }
-    {
-        let mut conn = match pool.get().await {
-            Ok(x) => x,
-            Err(_) => return
-        };
-        let mut sql = match sql_builder.sql() {
-            Ok(x) => x,
-            Err(_) => return
-        };
-        sql.pop();
-        sql.push_str("ON CONFLICT DO NOTHING;");
-        let transaction = match conn.transaction().await {
-            Ok(x) => x,
-            Err(_) => return
-        };
-        match transaction.batch_execute(&sql).await {
-            Ok(_) => (),
-            Err(_) => return
-        };
-        let _ = transaction.commit().await;
-    }
 }
 
 #[tokio::main]
@@ -246,7 +217,6 @@ async fn main() -> AsyncVoidResult {
     let pool_async = pool.clone();
 
     let queue = Arc::new(AppQueue::new());
-    let queue_async = queue.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(3)).await;
         {
@@ -269,12 +239,6 @@ async fn main() -> AsyncVoidResult {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 pool_async_async.get().await.unwrap().execute("DELETE FROM PESSOAS WHERE APELIDO LIKE 'WARMUP%';", &[]).await.unwrap();
             });
-        }
-        loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let queue = queue_async.clone();
-            if queue.len() == 0 { continue }
-            batch_insert(pool_async.clone(), queue).await;
         }
     });
 

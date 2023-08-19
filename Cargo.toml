@@ -21,6 +21,5 @@ chrono = "0.4"
 deadpool-redis = { version = "0.12", features = ["serde"] }
 config = "0.13.3"
 deadqueue = "0.2"
-sql-builder = "3.1"
 reqwest = "0.11"
 futures = "0.3"
