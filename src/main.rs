@@ -1,4 +1,4 @@
-use std::{time::Duration, sync::Arc};
+use std::time::Duration;
 use actix_web::{HttpServer, App, web, http::KeepAlive, HttpResponse};
 use chrono::NaiveDate;
 use deadpool_postgres::{Config, Runtime, PoolConfig, Pool, GenericClient, Timeouts};
@@ -43,9 +43,6 @@ impl PessoaDTO {
 
 type APIResult = Result<HttpResponse, Box<dyn std::error::Error>>;
 type AsyncVoidResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-type QueueEvent = (String, web::Json<CriarPessoaDTO>, Option<String>);
-type AppQueue = deadqueue::unlimited::Queue::<QueueEvent>;
 
 #[actix_web::post("/pessoas")]
 async fn criar_pessoa(
@@ -216,7 +213,6 @@ async fn main() -> AsyncVoidResult {
     println!("redis pool succesfully created");
     let pool_async = pool.clone();
 
-    let queue = Arc::new(AppQueue::new());
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(3)).await;
         {
@@ -246,7 +242,6 @@ async fn main() -> AsyncVoidResult {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(redis_pool.clone()))
-            .app_data(web::Data::new(queue.clone()))
             .service(criar_pessoa)
             .service(consultar_pessoa)
             .service(buscar_pessoas)
