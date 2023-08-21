@@ -1,8 +1,9 @@
-use std::time::Duration;
-use actix_web::{HttpServer, App, web, http::KeepAlive, HttpResponse};
+use std::{time::Duration, sync::Arc, collections::HashSet};
+use actix_web::{HttpServer, App, web, HttpResponse, http::KeepAlive};
 use chrono::NaiveDate;
 use deadpool_postgres::{Config, Runtime, PoolConfig, Pool, GenericClient, Timeouts};
 use deadpool_redis::{ConnectionInfo, RedisConnectionInfo, ConnectionAddr};
+use sql_builder::{SqlBuilder, quote};
 use tokio_postgres::{NoTls, Row};
 use serde::{Deserialize, Serialize};
 
@@ -43,20 +44,15 @@ impl PessoaDTO {
 
 type APIResult = Result<HttpResponse, Box<dyn std::error::Error>>;
 type AsyncVoidResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type QueueEvent = (String, web::Json<CriarPessoaDTO>, Option<String>);
+type AppQueue = deadqueue::unlimited::Queue::<QueueEvent>;
 
 #[actix_web::post("/pessoas")]
 async fn criar_pessoa(
-    pool: web::Data<Pool>,
     redis_pool: web::Data<deadpool_redis::Pool>,
     payload: web::Json<CriarPessoaDTO>,
-    // queue: web::Data<Arc<AppQueue>>
+    queue: web::Data<Arc<AppQueue>>
 ) -> APIResult {
-    let redis_key = format!("a/{}", payload.apelido.clone());
-    let mut redis_conn = redis_pool.get().await?;
-    match deadpool_redis::redis::cmd("GET").arg(&[redis_key.clone()]).query_async::<_, String>(&mut redis_conn).await {
-        Ok(_) => return Ok(HttpResponse::UnprocessableEntity().finish()),
-        Err(_) => ()    
-    };
     if payload.nome.len() > 100 {
         return Ok(HttpResponse::BadRequest().finish());
     }
@@ -73,7 +69,12 @@ async fn criar_pessoa(
             }
         }
     }
-    let _ = deadpool_redis::redis::cmd("SET").arg(&[redis_key.clone(), "0".into()]).query_async::<_, ()>(&mut redis_conn).await;
+    let redis_key = format!("a/{}", payload.apelido.clone());
+    let mut redis_conn = redis_pool.get().await?;
+    match deadpool_redis::redis::cmd("GET").arg(&[redis_key.clone()]).query_async::<_, String>(&mut redis_conn).await {
+        Ok(_) => return Ok(HttpResponse::UnprocessableEntity().finish()),
+        Err(_) => ()    
+    };
     let id = uuid::Uuid::new_v4().to_string();
     let stack = match &payload.stack {
         Some(v) => Some(v.join(" ")),
@@ -91,23 +92,73 @@ async fn criar_pessoa(
         stack: stack_vec
     };
     let body = serde_json::to_string(&dto)?;
-    deadpool_redis::redis::cmd("SET")
-        .arg(&[id.clone(), body.clone()]).query_async::<_, ()>(&mut redis_conn)
+    deadpool_redis::redis::cmd("MSET")
+        .arg(&[
+            id.clone(), body.clone(),
+            redis_key.clone(), "0".into()
+        ]).query_async::<_, ()>(&mut redis_conn)
         .await?;
-    tokio::spawn(async move {
-        let conn = pool.get().await.expect("error getting conn");
-        let _ = conn.execute("
-            INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT DO NOTHING;
-        ", &[&dto.id, &dto.apelido, &dto.nome, &dto.nascimento, &stack]).await;
-    });
+    // tokio::spawn(async move {
+    //     let conn = pool.get().await.expect("error getting conn");
+    //     let _ = conn.execute("
+    //         INSERT INTO PESSOAS (ID, APELIDO, NOME, NASCIMENTO, STACK)
+    //         VALUES ($1, $2, $3, $4, $5)
+    //         ON CONFLICT DO NOTHING;
+    //     ", &[&dto.id, &dto.apelido, &dto.nome, &dto.nascimento, &stack]).await;
+    // });
+    queue.push((id.clone(), payload, stack));
     
     Ok(
         HttpResponse::Created()
             .append_header(("Location", format!("/pessoas/{id}")))
             .finish()
     )
+}
+
+async fn batch_insert(pool: Pool, queue: Arc<AppQueue>) {
+    let mut apelidos = HashSet::<String>::new();
+    let mut sql = String::new();
+    while queue.len() > 0 {
+        let (id, payload, stack) = queue.pop().await;
+        if apelidos.contains(&payload.apelido) { continue }
+        apelidos.insert(payload.apelido.clone());
+        let mut sql_builder = SqlBuilder::insert_into("PESSOAS");
+        sql_builder
+            .field("ID")
+            .field("APELIDO")
+            .field("NOME")
+            .field("NASCIMENTO")
+            .field("STACK");
+        sql_builder.values(&[
+            &quote(id),
+            &quote(&payload.apelido),
+            &quote(&payload.nome),
+            &quote(&payload.nascimento),
+            &quote(stack.unwrap_or("".into()))
+        ]);
+        let mut this_sql = match sql_builder.sql() {
+            Ok(x) => x,
+            Err(_) => continue
+        };
+        this_sql.pop();
+        this_sql.push_str("ON CONFLICT DO NOTHING;");
+        sql.push_str(&this_sql.as_str());
+    }
+    {
+        let mut conn = match pool.get().await {
+            Ok(x) => x,
+            Err(_) => return
+        };
+        let transaction = match conn.transaction().await {
+            Ok(x) => x,
+            Err(_) => return
+        };
+        match transaction.batch_execute(&sql).await {
+            Ok(_) => (),
+            Err(_) => return
+        };
+        let _ = transaction.commit().await;
+    }
 }
 
 #[actix_web::get("/pessoas/{id}")]
@@ -156,12 +207,13 @@ async fn buscar_pessoas(parametros: web::Query<ParametrosBusca>, pool: web::Data
     let t = format!("%{}%", parametros.t.to_lowercase());
     let result = {
         let conn = pool.get().await?;
-        let rows = conn.query("
+        let stmt = conn.prepare_cached("
             SELECT ID, APELIDO, NOME, NASCIMENTO, STACK
             FROM PESSOAS P
             WHERE P.BUSCA_TRGM LIKE $1
             LIMIT 50;
-        ", &[&t]).await?;
+        ").await?;
+        let rows = conn.query(&stmt, &[&t]).await?;
         rows.iter().map(|row| PessoaDTO::from(row)).collect::<Vec<PessoaDTO>>()
     };
     let body = serde_json::to_string(&result)?;
@@ -185,7 +237,7 @@ async fn main() -> AsyncVoidResult {
     cfg.dbname = Some("rinhadb".to_string());
     cfg.user = Some("root".to_string());
     cfg.password = Some("1234".to_string());
-    let pc = PoolConfig::new(30);
+    let pc = PoolConfig::new(125);
     cfg.pool = pc.into();
     println!("creating postgres pool...");
     let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
@@ -201,18 +253,19 @@ async fn main() -> AsyncVoidResult {
         }
     });
     cfg.pool = Some(PoolConfig {
-        max_size: 12,
+        max_size: 9995,
         timeouts: Timeouts {
-            wait: Some(Duration::from_secs(2)),
-            create: None,
-            recycle: Some(Duration::from_secs(2))
+            wait: Some(Duration::from_secs(60)),
+            create: Some(Duration::from_secs(60)),
+            recycle: Some(Duration::from_secs(60))
         }
     });
     println!("creating redis pool...");
     let redis_pool = cfg.create_pool(Some(Runtime::Tokio1))?;
     println!("redis pool succesfully created");
     let pool_async = pool.clone();
-
+    let queue = Arc::new(AppQueue::new());
+    let queue_async = queue.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(3)).await;
         {
@@ -236,19 +289,25 @@ async fn main() -> AsyncVoidResult {
                 pool_async_async.get().await.unwrap().execute("DELETE FROM PESSOAS WHERE APELIDO LIKE 'WARMUP%';", &[]).await.unwrap();
             });
         }
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let queue = queue_async.clone();
+            if queue.len() == 0 { continue }
+            batch_insert(pool_async.clone(), queue).await;
+        }
     });
 
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(redis_pool.clone()))
+            .app_data(web::Data::new(queue.clone()))
             .service(criar_pessoa)
             .service(consultar_pessoa)
             .service(buscar_pessoas)
             .service(contar_pessoas)
     })
-    .keep_alive(KeepAlive::Os)
-    .client_request_timeout(Duration::from_secs(0))
+    .keep_alive(KeepAlive::Timeout(Duration::from_secs(200)))
     .bind("0.0.0.0:80")?
     .run()
     .await?;
