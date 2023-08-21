@@ -60,18 +60,18 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.85'
+          cpus: '0.9'
           memory: '1.4GB'
   redis:
     image: redis
     hostname: redis
     ports:
       - "6379:6379"
-    command: redis-server --save "" --appendonly no --maxclients 20000 --io-threads 2 --io-threads-do-reads yes
+    command: redis-server --save "" --appendonly no --maxclients 20000
     deploy:
       resources:
         limits:
-          cpus: '0.2'
+          cpus: '0.15'
           memory: '0.3GB'
 
 networks:
