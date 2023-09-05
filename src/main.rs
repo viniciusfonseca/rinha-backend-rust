@@ -69,7 +69,7 @@ async fn criar_pessoa(
             }
         }
     }
-    let redis_key = format!("a/{}", payload.apelido.clone());
+    let redis_key = format!("/{}", payload.apelido.clone());
     let mut redis_conn = redis_pool.get().await?;
     match deadpool_redis::redis::cmd("GET").arg(&[redis_key.clone()]).query_async::<_, String>(&mut redis_conn).await {
         Ok(_) => return Ok(HttpResponse::UnprocessableEntity().finish()),
@@ -84,14 +84,24 @@ async fn criar_pessoa(
     let nome = payload.nome.clone();
     let nascimento = payload.nascimento.clone();
     let stack_vec = payload.stack.clone();
-    let dto = PessoaDTO {
-        id: id.clone(),
-        apelido,
-        nome,
-        nascimento,
-        stack: stack_vec
+    // let dto = PessoaDTO {
+    //     id: id.clone(),
+    //     apelido,
+    //     nome,
+    //     nascimento,
+    //     stack: stack_vec
+    // };
+    // let body = serde_json::to_string(&dto)?;
+    let mut stack_str = String::new();
+    if let Some(x) = stack_vec {
+        stack_str.push('[');
+        for s in x {
+            stack_str.push_str(&format!("\"{s}\","));
+        }
+        stack_str.pop();
+        stack_str.push(']');
     };
-    let body = serde_json::to_string(&dto)?;
+    let body = format!("{{\"id\":\"{}\",\"apelido\":\"{}\",\"nome\":\"{}\",\"nascimento\":\"{}\",\"stack\":\"{}\"}}", id.clone(), apelido, nome, nascimento, stack_str);
     deadpool_redis::redis::cmd("MSET")
         .arg(&[
             id.clone(), body.clone(),
@@ -117,18 +127,17 @@ async fn criar_pessoa(
 
 async fn batch_insert(pool: Pool, queue: Arc<AppQueue>) {
     let mut apelidos = HashSet::<String>::new();
-    let mut sql = String::new();
+    let mut sql_builder = SqlBuilder::insert_into("PESSOAS");
+    sql_builder
+        .field("ID")
+        .field("APELIDO")
+        .field("NOME")
+        .field("NASCIMENTO")
+        .field("STACK");
     while queue.len() > 0 {
         let (id, payload, stack) = queue.pop().await;
         if apelidos.contains(&payload.apelido) { continue }
         apelidos.insert(payload.apelido.clone());
-        let mut sql_builder = SqlBuilder::insert_into("PESSOAS");
-        sql_builder
-            .field("ID")
-            .field("APELIDO")
-            .field("NOME")
-            .field("NASCIMENTO")
-            .field("STACK");
         sql_builder.values(&[
             &quote(id),
             &quote(&payload.apelido),
@@ -136,13 +145,6 @@ async fn batch_insert(pool: Pool, queue: Arc<AppQueue>) {
             &quote(&payload.nascimento),
             &quote(stack.unwrap_or("".into()))
         ]);
-        let mut this_sql = match sql_builder.sql() {
-            Ok(x) => x,
-            Err(_) => continue
-        };
-        this_sql.pop();
-        this_sql.push_str("ON CONFLICT DO NOTHING;");
-        sql.push_str(&this_sql.as_str());
     }
     {
         let mut conn = match pool.get().await {
@@ -153,6 +155,12 @@ async fn batch_insert(pool: Pool, queue: Arc<AppQueue>) {
             Ok(x) => x,
             Err(_) => return
         };
+        let mut sql = match sql_builder.sql() {
+            Ok(x) => x,
+            Err(_) => return
+        };
+        sql.pop();
+        sql.push_str("ON CONFLICT DO NOTHING;");
         match transaction.batch_execute(&sql).await {
             Ok(_) => (),
             Err(_) => return
@@ -237,7 +245,7 @@ async fn main() -> AsyncVoidResult {
     cfg.dbname = Some("rinhadb".to_string());
     cfg.user = Some("root".to_string());
     cfg.password = Some("1234".to_string());
-    let pc = PoolConfig::new(125);
+    let pc = PoolConfig::new(175);
     cfg.pool = pc.into();
     println!("creating postgres pool...");
     let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
