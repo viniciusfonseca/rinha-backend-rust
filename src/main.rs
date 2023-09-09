@@ -241,7 +241,8 @@ async fn contar_pessoas(pool: web::Data<Pool>) -> APIResult {
 async fn main() -> AsyncVoidResult {
     
     let mut cfg = Config::new();
-    cfg.host = Some("db".to_string());
+    cfg.host = Some("0.0.0.0".to_string());
+    cfg.port = Some(5432);
     cfg.dbname = Some("rinhadb".to_string());
     cfg.user = Some("root".to_string());
     cfg.password = Some("1234".to_string());
@@ -253,7 +254,7 @@ async fn main() -> AsyncVoidResult {
 
     let mut cfg = deadpool_redis::Config::default();
     cfg.connection = Some(ConnectionInfo {
-        addr: ConnectionAddr::Tcp("172.17.0.1".into(), 6379),
+        addr: ConnectionAddr::Tcp("0.0.0.0".into(), 6379),
         redis: RedisConnectionInfo {
             db: 0,
             username: None,
@@ -278,7 +279,7 @@ async fn main() -> AsyncVoidResult {
         tokio::time::sleep(Duration::from_secs(3)).await;
         {
             let http_client = reqwest::Client::new();
-            let nginx_url = "http://172.17.0.1:9999/pessoas";
+            let nginx_url = "http://localhost:9999/pessoas";
             let mount_body = |n: u16| format!("{{\"apelido\":\"WARMUP::vaf{n}\",\"nascimento\":\"1999-01-01\",\"nome\":\"VAF\"}}");
             let mut f = vec![];
             let v = vec![0, 1, 2, 1, 0];
@@ -293,7 +294,7 @@ async fn main() -> AsyncVoidResult {
             futures::future::join_all(f).await;
             let pool_async_async = pool_async.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(6)).await;
                 pool_async_async.get().await.unwrap().execute("DELETE FROM PESSOAS WHERE APELIDO LIKE 'WARMUP%';", &[]).await.unwrap();
             });
         }
@@ -305,6 +306,8 @@ async fn main() -> AsyncVoidResult {
         }
     });
 
+    let port = std::env::var("PORT")?;
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -315,8 +318,8 @@ async fn main() -> AsyncVoidResult {
             .service(buscar_pessoas)
             .service(contar_pessoas)
     })
-    .keep_alive(KeepAlive::Timeout(Duration::from_secs(200)))
-    .bind("0.0.0.0:80")?
+    .keep_alive(KeepAlive::Os)
+    .bind(format!("0.0.0.0:{port}"))?
     .run()
     .await?;
 

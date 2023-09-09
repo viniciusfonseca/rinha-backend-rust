@@ -7,13 +7,19 @@ services:
     depends_on:
       - db
       - redis
-    expose:
-      - "80"
+    environment:
+      PORT: "8080"
     deploy:
       resources:
         limits:
           cpus: '0.15'
           memory: '0.4GB'
+    network_mode: "host"
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 1000000
+        hard: 1000000
 
   api02: # API - Instância 02
     image: distanteagle16/rinhabackend:latest
@@ -21,13 +27,19 @@ services:
     depends_on:
       - db
       - redis
-    expose:
-      - "80"
+    environment:
+      PORT: "8081"
     deploy:
       resources:
         limits:
           cpus: '0.15'
           memory: '0.4GB'
+    network_mode: "host"
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 1000000
+        hard: 1000000
 
   nginx: # Load Balancer
     image: nginx:latest
@@ -43,6 +55,7 @@ services:
         limits:
           cpus: '0.15'
           memory: '0.5GB'
+    network_mode: "host"
 
   db: # Banco de dados
     image: postgres
@@ -62,6 +75,7 @@ services:
         limits:
           cpus: '0.9'
           memory: '1.4GB'
+    network_mode: "host"
   redis:
     image: redis
     hostname: redis
@@ -73,8 +87,9 @@ services:
         limits:
           cpus: '0.15'
           memory: '0.3GB'
+    network_mode: "host"
 
-networks:
-  default:
-    driver: bridge
-    name: rinha
+# networks:
+#   default:
+#     driver: bridge
+#     name: rinha
