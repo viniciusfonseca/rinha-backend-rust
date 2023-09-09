@@ -19,6 +19,7 @@ async fn main() -> AsyncVoidResult {
             .unwrap_or("localhost".into())
             .to_string(),
     );
+    cfg.port = Some(5432);
     cfg.dbname = Some("rinhadb".to_string());
     cfg.user = Some("root".to_string());
     cfg.password = Some("1234".to_string());
@@ -71,8 +72,8 @@ async fn main() -> AsyncVoidResult {
             .service(buscar_pessoas)
             .service(contar_pessoas)
     })
-    .keep_alive(KeepAlive::Timeout(Duration::from_secs(200)))
-    .bind(format!("0.0.0.0:{}", http_port))?
+    .keep_alive(KeepAlive::Os)
+    .bind(format!("0.0.0.0:{port}"))?
     .run()
     .await?;
 

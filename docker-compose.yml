@@ -9,12 +9,19 @@ services:
     depends_on:
       - db
       - redis
-    network_mode: host
+    environment:
+      PORT: "8080"
     deploy:
       resources:
         limits:
           cpus: '0.15'
           memory: '0.4GB'
+    network_mode: "host"
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 1000000
+        hard: 1000000
 
   api02:
     <<: *api
