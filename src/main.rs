@@ -57,9 +57,12 @@ async fn main() -> AsyncVoidResult {
     println!("redis pool succesfully created");
 
     let pool_async = pool.clone();
+    tokio::spawn(async move { db_warmup(pool_async) });
+
+    let pool_async = pool.clone();
     let queue = Arc::new(AppQueue::new());
     let queue_async = Arc::clone(&queue);
-    tokio::spawn(async move { db_warmup(pool_async, queue_async) });
+    tokio::spawn(async move { db_flush_queue(pool_async, queue_async) });
 
     let http_port = env::var("HTTP_PORT").unwrap_or("80".into());
     HttpServer::new(move || {
@@ -73,7 +76,7 @@ async fn main() -> AsyncVoidResult {
             .service(contar_pessoas)
     })
     .keep_alive(KeepAlive::Os)
-    .bind(format!("0.0.0.0:{port}"))?
+    .bind(format!("0.0.0.0:{http_port}"))?
     .run()
     .await?;
 

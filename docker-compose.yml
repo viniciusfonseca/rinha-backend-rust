@@ -9,8 +9,6 @@ services:
     depends_on:
       - db
       - redis
-    environment:
-      PORT: "8080"
     deploy:
       resources:
         limits:

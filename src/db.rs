@@ -109,7 +109,7 @@ pub async fn db_clean_warmup(pool_async_async: Pool) {
         .unwrap();
 }
 
-pub async fn db_warmup(pool_async: Pool, queue_async: Arc<AppQueue>) {
+pub async fn db_warmup(pool_async: Pool) {
     tokio::time::sleep(Duration::from_secs(3)).await;
     {
         let http_client = reqwest::Client::new();
@@ -136,6 +136,9 @@ pub async fn db_warmup(pool_async: Pool, queue_async: Arc<AppQueue>) {
         let pool_async_async = pool_async.clone();
         tokio::spawn(async move { db_clean_warmup(pool_async_async) });
     }
+}
+
+pub async fn db_flush_queue(pool_async: Pool, queue_async: Arc<AppQueue>) {
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let queue = queue_async.clone();
