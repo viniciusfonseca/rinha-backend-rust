@@ -21,6 +21,7 @@ services:
         soft: 1000000
         hard: 1000000
 
+
   api02:
     <<: *api
     environment:
@@ -39,6 +40,7 @@ services:
         limits:
           cpus: '0.15'
           memory: '0.5GB'
+    network_mode: "host"
 
   db: # Banco de dados
     image: postgres

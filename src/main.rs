@@ -65,6 +65,7 @@ async fn main() -> AsyncVoidResult {
     tokio::spawn(async move { db_flush_queue(pool_async, queue_async) });
 
     let http_port = env::var("HTTP_PORT").unwrap_or("80".into());
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
