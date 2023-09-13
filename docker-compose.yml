@@ -6,6 +6,9 @@ services:
     build: .
     environment:
       HTTP_PORT: 8080
+      DB_HOST: localhost
+      REDIS_HOST: localhost
+      POOL_SIZE: 30
     depends_on:
       - db
       - redis
@@ -15,17 +18,14 @@ services:
           cpus: '0.15'
           memory: '0.4GB'
     network_mode: "host"
-    ulimits:
-      nproc: 65535
-      nofile:
-        soft: 1000000
-        hard: 1000000
-
 
   api02:
     <<: *api
     environment:
       HTTP_PORT: 8081
+      DB_HOST: localhost
+      REDIS_HOST: localhost
+      POOL_SIZE: 30
 
   nginx: # Load Balancer
     image: nginx:latest
@@ -53,6 +53,12 @@ services:
       - ./postgresql.conf:/docker-entrypoint-initdb.d/postgresql.conf
     command: postgres -c config_file=/docker-entrypoint-initdb.d/postgresql.conf
     network_mode: host
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     deploy:
       resources:
         limits:

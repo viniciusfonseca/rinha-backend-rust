@@ -3,6 +3,7 @@ use deadpool_postgres::Pool;
 use std::{sync::Arc, time::Duration};
 
 pub async fn db_clean_warmup(pool_async_async: Pool) {
+    println!("cleaning warmup data...");
     tokio::time::sleep(Duration::from_secs(5)).await;
     pool_async_async
         .get()
@@ -14,6 +15,7 @@ pub async fn db_clean_warmup(pool_async_async: Pool) {
 }
 
 pub async fn db_warmup() {
+    println!("warming up...");
     tokio::time::sleep(Duration::from_secs(3)).await;
     let http_client = reqwest::Client::new();
     let nginx_url = "http://localhost:9999/pessoas";
@@ -34,9 +36,11 @@ pub async fn db_warmup() {
         }
     }
     futures::future::join_all(f).await;
+    println!("warmup finished");
 }
 
 pub async fn db_flush_queue(pool_async: Pool, queue_async: Arc<AppQueue>) {
+    println!("queue flush job started (loop every 2 seconds)");
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let queue = queue_async.clone();
