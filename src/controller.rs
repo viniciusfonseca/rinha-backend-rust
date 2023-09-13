@@ -1,4 +1,5 @@
 use crate::db::*;
+use crate::redis::*;
 use actix_web::{web, HttpResponse};
 use chrono::NaiveDate;
 use deadpool_postgres::Pool;
@@ -23,7 +24,7 @@ pub async fn criar_pessoa(
         Err(_) => (),
     };
     let id = uuid::Uuid::new_v4().to_string();
-    let dto = create_dto_and_cache(payload, &id, queue);
+    let dto = create_dto_and_queue(payload, &id, queue.clone());
     let body = serde_json::to_string(&dto)?;
     let _ = set_redis(&redis_pool, &id, &body).await;
 
@@ -94,7 +95,7 @@ fn validate_payload(payload: &CriarPessoaDTO) -> Option<HttpResponse> {
     return None;
 }
 
-fn create_dto_and_cache(
+fn create_dto_and_queue(
     payload: web::Json<CriarPessoaDTO>,
     id: &String,
     queue: web::Data<Arc<AppQueue>>,

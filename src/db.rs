@@ -2,7 +2,6 @@ use actix_web::web;
 use deadpool_postgres::{GenericClient, Pool};
 use serde::{Deserialize, Serialize};
 use sql_builder::{quote, SqlBuilder};
-use std::time::Duration;
 use std::{collections::HashSet, sync::Arc};
 use tokio_postgres::Row;
 
@@ -150,72 +149,4 @@ pub async fn batch_insert(pool: Pool, queue: Arc<AppQueue>) {
         };
         let _ = transaction.commit().await;
     }
-}
-
-pub async fn db_clean_warmup(pool_async_async: Pool) {
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    pool_async_async
-        .get()
-        .await
-        .unwrap()
-        .execute("DELETE FROM PESSOAS WHERE APELIDO LIKE 'WARMUP%';", &[])
-        .await
-        .unwrap();
-}
-
-pub async fn db_warmup() {
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let http_client = reqwest::Client::new();
-    let nginx_url = "http://localhost:9999/pessoas";
-    let mount_body = |n: u16| {
-        format!("{{\"apelido\":\"WARMUP::vaf{n}\",\"nascimento\":\"1999-01-01\",\"nome\":\"VAF\"}}")
-    };
-    let mut f = vec![];
-    let v = vec![0, 1, 2, 1, 0];
-    for i in 0..511 {
-        for j in &v {
-            f.push(
-                http_client
-                    .post(nginx_url)
-                    .body(mount_body(j + i))
-                    .header("Content-Type", "application/json")
-                    .send(),
-            );
-        }
-    }
-    futures::future::join_all(f).await;
-}
-
-pub async fn db_flush_queue(pool_async: Pool, queue_async: Arc<AppQueue>) {
-    loop {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let queue = queue_async.clone();
-        if queue.len() == 0 {
-            continue;
-        }
-        batch_insert(pool_async.clone(), queue).await;
-    }
-}
-
-pub async fn get_redis(
-    redis_pool: &deadpool_redis::Pool,
-    key: &str,
-) -> deadpool_redis::redis::RedisResult<String> {
-    let mut redis_conn = redis_pool.get().await.unwrap();
-    return deadpool_redis::redis::cmd("GET")
-        .arg(&[key.clone()])
-        .query_async::<_, String>(&mut redis_conn)
-        .await;
-}
-
-pub async fn set_redis(
-    redis_pool: &deadpool_redis::Pool,
-    key: &str,
-    value: &str,
-) -> deadpool_redis::redis::RedisResult<()> {
-    let mut redis_conn = redis_pool.get().await.unwrap();
-    return deadpool_redis::redis::cmd("SET")
-        .arg(&[key.clone(), value.clone()])
-        .query_async::<_, ()>(&mut redis_conn)
-        .await;
 }

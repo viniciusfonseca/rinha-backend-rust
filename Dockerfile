@@ -2,11 +2,17 @@ FROM rust:1.71.1
 
 RUN apt-get update -yqq && apt-get install -yqq cmake g++
 
-ADD ./ /actix
 WORKDIR /actix
 
-RUN cargo clean
-RUN make target
+RUN mkdir src; touch src/main.rs
+
+COPY Cargo.toml Cargo.lock ./
+
+RUN cargo fetch
+
+COPY src/ ./src/
+
+RUN cargo build --release
 
 EXPOSE 80
 

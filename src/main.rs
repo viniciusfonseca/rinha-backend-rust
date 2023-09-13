@@ -8,8 +8,13 @@ use tokio_postgres::NoTls;
 mod db;
 use db::*;
 
+mod redis;
+
 mod controller;
 use controller::*;
+
+mod jobs;
+use jobs::*;
 
 #[tokio::main]
 async fn main() -> AsyncVoidResult {
@@ -56,15 +61,15 @@ async fn main() -> AsyncVoidResult {
     let redis_pool = cfg.create_pool(Some(Runtime::Tokio1))?;
     println!("redis pool succesfully created");
 
-    tokio::spawn(async move { db_warmup() });
+    tokio::spawn(async move { db_warmup().await });
 
-    let pool_async2 = pool.clone();
-    tokio::spawn(async move { db_clean_warmup(pool_async2) });
+    let pool_async = pool.clone();
+    tokio::spawn(async move { db_clean_warmup(pool_async).await });
 
-    let pool_async3 = pool.clone();
+    let pool_async = pool.clone();
     let queue = Arc::new(AppQueue::new());
     let queue_async = queue.clone();
-    tokio::spawn(async move { db_flush_queue(pool_async3, queue_async) });
+    tokio::spawn(async move { db_flush_queue(pool_async, queue_async).await });
 
     let http_port = env::var("HTTP_PORT").unwrap_or("80".into());
 
