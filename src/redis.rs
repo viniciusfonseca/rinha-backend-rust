@@ -4,7 +4,7 @@ pub async fn get_redis(
 ) -> deadpool_redis::redis::RedisResult<String> {
     let mut redis_conn = redis_pool.get().await.unwrap();
     return deadpool_redis::redis::cmd("GET")
-        .arg(&[key.clone()])
+        .arg(&[key])
         .query_async::<_, String>(&mut redis_conn)
         .await;
 }
@@ -16,7 +16,7 @@ pub async fn set_redis(
 ) -> deadpool_redis::redis::RedisResult<()> {
     let mut redis_conn = redis_pool.get().await.unwrap();
     return deadpool_redis::redis::cmd("SET")
-        .arg(&[key.clone(), value.clone()])
+        .arg(&[key, value])
         .query_async::<_, ()>(&mut redis_conn)
         .await;
 }
