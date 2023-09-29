@@ -59,7 +59,6 @@ pub async fn db_search(
     conn: &deadpool_postgres::Client,
     t: String,
 ) -> Result<Vec<PessoaDTO>, Box<dyn std::error::Error>> {
-    let t = format!("%{}%", t.to_lowercase());
     let stmt = conn
         .prepare_cached(
             "
